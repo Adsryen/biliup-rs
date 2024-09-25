@@ -1,35 +1,18 @@
 use futures::Stream;
-
 use rand::distributions::uniform::{UniformFloat, UniformSampler};
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
-
 pub mod client;
 pub mod downloader;
 pub mod error;
+#[cfg(feature = "server")]
+pub mod server;
 pub mod uploader;
-pub mod server {
-    pub mod errors;
 
-    pub mod api {
-        pub mod endpoints;
-        pub mod router;
-    }
-
-    pub mod core;
-
-    pub mod infrastructure {
-        pub mod repositories {
-            pub mod live_streamers_repository;
-        }
-
-        pub mod connection_pool;
-        pub mod live_streamers_service;
-        pub mod service_register;
-    }
-}
+pub use uploader::bilibili;
+pub use uploader::credential;
 
 pub async fn retry<F, Fut, O, E: std::fmt::Display>(mut f: F) -> Result<O, E>
 where
@@ -70,6 +53,7 @@ mod tests {
 
     #[test]
     fn it_works() {
+        assert_eq!(Ok(Vid::Aid(10)), Vid::from_str("10"));
         assert_eq!(Ok(Vid::Aid(971158452)), Vid::from_str("971158452"));
         assert_eq!(Ok(Vid::Aid(971158452)), Vid::from_str("av971158452"));
         assert_eq!(

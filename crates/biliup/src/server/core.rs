@@ -1,6 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 pub mod download_actor;
 pub mod live_streamers;
+pub mod main_loop;
 pub mod upload_actor;
+pub mod upload_streamers;
+pub mod users;
 pub mod util;
 
 /// Status of the live stream
@@ -14,13 +19,14 @@ pub enum LiveStatus {
 }
 
 /// Status of the live stream
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub enum StreamStatus {
     /// Stream is online.
-    Downloading,
+    Working,
     /// Stream is offline.
-    Uploading,
+    Inspecting,
     /// The status of the stream could not be determined.
+    #[default]
     Pending,
     Idle,
 }

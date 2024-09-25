@@ -10,6 +10,9 @@ pub enum Kind {
     Custom(String),
 
     #[error(transparent)]
+    Dialoguer(#[from] dialoguer::Error),
+
+    #[error(transparent)]
     IO(#[from] std::io::Error),
 
     #[error(transparent)]
@@ -33,6 +36,11 @@ pub enum Kind {
     #[error(transparent)]
     SerdeUrl(#[from] serde_urlencoded::ser::Error),
     // source and Display delegate to anyhow::Error
+    #[error(transparent)]
+    AnyhowError(#[from] anyhow::Error),
+
+    #[error("need recaptcha")]
+    NeedRecaptcha(String),
 }
 
 impl From<&str> for Kind {

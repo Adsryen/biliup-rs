@@ -1,9 +1,13 @@
 use indexmap::IndexMap;
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use tokio::task::JoinHandle;
+use tracing::error;
 
 pub type AnyMap<T> = HashMap<TypeId, T, BuildHasherDefault<IdHasher>>;
 
@@ -57,6 +61,11 @@ impl<T: Copy> Cycle<T> {
         }
     }
 
+    pub fn get_all(&self) -> IndexMap<String, T> {
+        let read_guard = self.map.read().unwrap();
+        read_guard.clone()
+    }
+
     pub fn replace(&mut self, map: IndexMap<String, T>) {
         if map.is_empty() {
             unreachable!("list must not be empty")
@@ -66,6 +75,12 @@ impl<T: Copy> Cycle<T> {
 
     pub fn write(&self) -> RwLockWriteGuard<'_, IndexMap<String, T>> {
         self.map.write().unwrap()
+    }
+
+    pub fn change(&self, key: &str, value: T) {
+        self.write()
+            .entry(String::from(key))
+            .and_modify(|mt| *mt = value);
     }
 
     pub fn insert(&self, key: String, value: T) {
@@ -83,4 +98,17 @@ impl<T: Debug> Debug for Cycle<T> {
         write!(f, "{}", temp.join(","))?;
         write!(f, " }}")
     }
+}
+
+pub fn logging_spawn<T, O: 'static>(future: T) -> JoinHandle<T::Output>
+where
+    T: Future<Output = Result<O, Box<dyn Error + Send + Sync>>> + Send + 'static,
+    T::Output: Send + 'static,
+{
+    tokio::spawn(async move {
+        future.await.map_err(|e| {
+            error!("spawn error: {}", e);
+            e
+        })
+    })
 }

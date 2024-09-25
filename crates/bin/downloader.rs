@@ -7,12 +7,12 @@ use biliup::downloader::flv_parser::{
 use biliup::downloader::flv_writer;
 use biliup::downloader::flv_writer::{FlvTag, TagDataHeader};
 use biliup::downloader::httpflv::map_parse_err;
-use biliup::downloader::util::{LifecycleFile, Segmentable};
+use biliup::downloader::util::Segmentable;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io::{BufReader, BufWriter, ErrorKind, Read};
 use std::path::PathBuf;
 
-use tracing::warn;
+use tracing::{error, info, warn};
 
 pub async fn download(
     url: &str,
@@ -24,8 +24,7 @@ pub async fn download(
     let client = Default::default();
     if let Some(extractor) = find_extractor(url) {
         let mut site = extractor.get_site(url, client).await?;
-        let file: LifecycleFile = LifecycleFile::new(&output);
-        site.download(file, segmentable).await?;
+        site.download(&output, segmentable, None).await?;
     } else {
         warn!("not find extractor for {url}")
     }
@@ -70,7 +69,7 @@ pub fn generate_json(mut file_name: PathBuf) -> Result<()> {
         let tag_header = match map_parse_err(tag_header(&t_header), "tag header") {
             Ok((_, tag_header)) => tag_header,
             Err(e) => {
-                println!("{e}");
+                error!("{e}");
                 break;
             }
         };
@@ -82,7 +81,7 @@ pub fn generate_json(mut file_name: PathBuf) -> Result<()> {
         ) {
             Ok((i, flv_tag_data)) => (i, flv_tag_data),
             Err(e) => {
-                println!("{e}");
+                error!("{e}");
                 break;
             }
         };
@@ -147,10 +146,10 @@ pub fn generate_json(mut file_name: PathBuf) -> Result<()> {
         };
         flv_writer::to_json(&mut writer, &flv_tag)?;
     }
-    println!("tag count: {tag_count}");
-    println!("script tag count: {script_tag_count}");
-    println!("audio tag count: {audio_tag_count}");
-    println!("video tag count: {video_tag_count}");
+    info!("tag count: {tag_count}");
+    info!("script tag count: {script_tag_count}");
+    info!("audio tag count: {audio_tag_count}");
+    info!("video tag count: {video_tag_count}");
     Ok(())
 }
 
@@ -172,7 +171,7 @@ impl<T: Read> Reader<T> {
         loop {
             if chunk_size <= self.buffer.len() {
                 let bytes = Bytes::copy_from_slice(&self.buffer[..chunk_size]);
-                self.buffer.advance(chunk_size as usize);
+                self.buffer.advance(chunk_size);
                 return Ok(bytes);
             }
             // BytesMut::with_capacity(0).deref_mut()

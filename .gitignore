@@ -2,8 +2,11 @@
 .idea
 *.mp4
 *.flv
-*.json
 *.exe
 *.png
 *.part
-data.db
+data.db*
+*.whl
+.vscode
+*.json
+*.yaml
