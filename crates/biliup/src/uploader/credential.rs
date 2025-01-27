@@ -1,19 +1,17 @@
 use crate::client::StatefulClient;
+use futures::Future;
 use reqwest::header;
-use serde::ser::Error;
-use std::fmt::{Display, Formatter};
 use std::io::Seek;
 use std::path::Path;
 
 use crate::error::{Kind, Result};
-use crate::uploader::bilibili::{BiliBili, ResResult};
-use base64::encode;
+use crate::uploader::bilibili::{BiliBili, ResponseData};
+use base64::{engine::general_purpose, Engine as _};
 use cookie::Cookie;
 use md5::{Digest, Md5};
-use rand::rngs::OsRng;
 use reqwest::header::{COOKIE, ORIGIN, REFERER, USER_AGENT};
 
-use rsa::{pkcs8::FromPublicKey, PaddingScheme, PublicKey, RsaPublicKey};
+use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,14 +36,14 @@ pub(crate) enum AppKeyStore {
 }
 
 impl AppKeyStore {
-    fn app_key(&self) -> &'static str {
+    pub fn app_key(&self) -> &'static str {
         match self {
             AppKeyStore::BiliTV => "4409e2ce8ffd12b8",
             AppKeyStore::Android => "783bbb7264451d82",
         }
     }
 
-    fn appsec(&self) -> &'static str {
+    pub fn appsec(&self) -> &'static str {
         match self {
             AppKeyStore::BiliTV => "59b43e04ad6965f34319062b478f83dd",
             AppKeyStore::Android => "2653583c8873dea268ab9386918b1d65",
@@ -53,8 +51,8 @@ impl AppKeyStore {
     }
 }
 
-pub async fn login_by_cookies(file: impl AsRef<Path>) -> Result<BiliBili> {
-    let client = Credential::new();
+pub async fn login_by_cookies(file: impl AsRef<Path>, proxy: Option<&str>) -> Result<BiliBili> {
+    let client = Credential::new(proxy);
     // let path = file.as_ref();
     let mut file = std::fs::File::options().read(true).write(true).open(file)?;
     let login_info: LoginInfo = serde_json::from_reader(std::io::BufReader::new(&file))?;
@@ -66,7 +64,7 @@ pub async fn login_by_cookies(file: impl AsRef<Path>) -> Result<BiliBili> {
     // }
     let login_info = match response {
         ResponseData {
-            data: ResponseValue::OAuth(OAuthInfo { refresh: true, .. }),
+            data: Some(ResponseValue::OAuth(OAuthInfo { refresh: true, .. })),
             ..
         } => {
             let new_info = client.renew_tokens(login_info).await?;
@@ -76,7 +74,7 @@ pub async fn login_by_cookies(file: impl AsRef<Path>) -> Result<BiliBili> {
             new_info
         }
         ResponseData {
-            data: ResponseValue::OAuth(OAuthInfo { refresh: false, .. }),
+            data: Some(ResponseValue::OAuth(OAuthInfo { refresh: false, .. })),
             ..
         } => {
             info!("无需更新cookie");
@@ -88,24 +86,6 @@ pub async fn login_by_cookies(file: impl AsRef<Path>) -> Result<BiliBili> {
         client: client.0.client,
         login_info,
     })
-}
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub struct ResponseData {
-    pub code: i32,
-    pub data: ResponseValue,
-    message: String,
-    ttl: u8,
-}
-
-impl Display for ResponseData {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            serde_json::to_string(self).map_err(std::fmt::Error::custom)?
-        )
-    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -147,16 +127,16 @@ pub struct OAuthInfo {
 pub struct Credential(StatefulClient);
 
 impl Credential {
-    pub fn new() -> Self {
+    pub fn new(proxy: Option<&str>) -> Self {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             "Referer",
             header::HeaderValue::from_static("https://www.bilibili.com/"),
         );
-        Self(StatefulClient::new(headers))
+        Self(StatefulClient::new(headers, proxy))
     }
 
-    async fn validate_tokens(&self, login_info: &LoginInfo) -> Result<ResponseData> {
+    async fn validate_tokens(&self, login_info: &LoginInfo) -> Result<ResponseData<ResponseValue>> {
         let payload = {
             let mut payload = json!({
                 "access_key": login_info.token_info.access_token,
@@ -171,7 +151,7 @@ impl Credential {
             payload
         };
 
-        let response: ResponseData = self
+        let response = self
             .0
             .client
             .get("https://passport.bilibili.com/x/passport-login/oauth2/info")
@@ -205,7 +185,7 @@ impl Credential {
             payload["sign"] = Value::from(sign);
             payload
         };
-        let response: ResponseData = self
+        let response: ResponseData<ResponseValue> = self
             .0
             .client
             .post("https://passport.bilibili.com/x/passport-login/oauth2/refresh_token")
@@ -216,7 +196,7 @@ impl Credential {
             .await?;
         info!("更新cookie");
         match response.data {
-            ResponseValue::Login(info) if !info.cookie_info.is_null() => {
+            Some(ResponseValue::Login(info)) if !info.cookie_info.is_null() => {
                 self.set_cookie(&info.cookie_info);
                 Ok(LoginInfo {
                     platform: login_info.platform,
@@ -229,17 +209,13 @@ impl Credential {
 
     pub async fn login_by_password(&self, username: &str, password: &str) -> Result<LoginInfo> {
         // The type of `payload` is `serde_json::Value`
+        let mut rng = rand::thread_rng();
         let (key_hash, pub_key) = self.get_key().await?;
         let pub_key = RsaPublicKey::from_public_key_pem(&pub_key).unwrap();
-        let padding = PaddingScheme::new_pkcs1v15_encrypt();
         let enc_data = pub_key
-            .encrypt(
-                &mut OsRng,
-                padding,
-                format!("{}{}", key_hash, password).as_bytes(),
-            )
+            .encrypt(&mut rng, Pkcs1v15Encrypt, (key_hash + password).as_bytes())
             .expect("failed to encrypt");
-        let encrypt_password = encode(enc_data);
+        let encrypt_password = general_purpose::STANDARD_NO_PAD.encode(enc_data);
         let mut payload = json!({
             "actionKey": "appkey",
             "appkey": AppKeyStore::Android.app_key(),
@@ -261,7 +237,7 @@ impl Credential {
         let urlencoded = serde_urlencoded::to_string(&payload)?;
         let sign = Self::sign(&urlencoded, AppKeyStore::Android.appsec());
         payload["sign"] = Value::from(sign);
-        let response: ResponseData = self
+        let response: ResponseData<ResponseValue> = self
             .0
             .client
             .post("https://passport.bilibili.com/x/passport-login/oauth2/login")
@@ -272,7 +248,7 @@ impl Credential {
             .await?;
         info!("通过密码登录");
         match response.data {
-            ResponseValue::Login(info) if !info.cookie_info.is_null() => {
+            Some(ResponseValue::Login(info)) if !info.cookie_info.is_null() => {
                 self.set_cookie(&info.cookie_info);
                 Ok(LoginInfo {
                     platform: Some("Android".to_string()),
@@ -292,7 +268,7 @@ impl Credential {
         let urlencoded = serde_urlencoded::to_string(&payload)?;
         let sign = Self::sign(&urlencoded, AppKeyStore::Android.appsec());
         payload["sign"] = Value::from(sign);
-        let res: ResponseData = self
+        let res: ResponseData<ResponseValue> = self
             .0
             .client
             .post("https://passport.bilibili.com/x/passport-login/login/sms")
@@ -302,7 +278,7 @@ impl Credential {
             .json()
             .await?;
         match res.data {
-            ResponseValue::Login(info) => Ok(LoginInfo {
+            Some(ResponseValue::Login(info)) => Ok(LoginInfo {
                 platform: Some("Android".to_string()),
                 ..info
             }),
@@ -315,10 +291,64 @@ impl Credential {
         phone_number: u64,
         country_code: u32,
     ) -> Result<serde_json::Value> {
+        self.send_sms_with_recaptcha(phone_number, country_code, None, None, None)
+            .await
+    }
+
+    pub async fn send_sms_handle_recaptcha<'a, F, Fut>(
+        &self,
+        phone_number: u64,
+        country_code: u32,
+        recaptcha_handler: F,
+    ) -> Result<serde_json::Value>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: Future<Output = Result<(String, String)>>,
+    {
+        let url_string = match self
+            .send_sms_with_recaptcha(phone_number, country_code, None, None, None)
+            .await
+        {
+            Ok(res) => return Ok(res),
+            Err(Kind::NeedRecaptcha(url)) => url,
+            Err(e) => return Err(e),
+        };
+
+        let recaptcha = {
+            Url::parse(&url_string)
+                .map_err(|_| Kind::from("url parse error"))?
+                .query_pairs()
+                .find(|(k, _)| k == "recaptcha_token")
+                .map(|(_, v)| v.to_string())
+                .ok_or(Kind::from("cannot find recaptcha_token"))
+        }?;
+
+        info!("需要滑动验证码");
+        let (challenge, validate) = recaptcha_handler(url_string).await?;
+
+        self.send_sms_with_recaptcha(
+            phone_number,
+            country_code,
+            Some(challenge.as_str()),
+            Some(validate.as_str()),
+            Some(recaptcha.as_ref()),
+        )
+        .await
+    }
+
+    pub async fn send_sms_with_recaptcha(
+        &self,
+        phone_number: u64,
+        country_code: u32,
+        challenge: Option<&str>,
+        validate: Option<&str>,
+        recaptcha: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let mut payload = json!({
             "actionKey": "appkey",
             "appkey": AppKeyStore::Android.app_key(),
             "build": 6510400,
+            "buvid": &self.0.buvid,
             "channel": "bili",
             "cid": country_code,
             "device": "phone",
@@ -329,12 +359,19 @@ impl Credential {
             "ts": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         });
 
+        if let (Some(c), Some(v), Some(r)) = (challenge, validate, recaptcha) {
+            payload["gee_challenge"] = Value::from(c);
+            payload["gee_seccode"] = Value::from(format!("{v}|jordan"));
+            payload["gee_validate"] = Value::from(v);
+            payload["recaptcha_token"] = Value::from(r);
+        }
+
         let urlencoded = serde_urlencoded::to_string(&payload)?;
         let sign = Self::sign(&urlencoded, AppKeyStore::Android.appsec());
         let urlencoded = format!("{}&sign={}", urlencoded, sign);
         // let mut form = payload.clone();
         // form["sign"] = Value::from(sign);
-        let res: ResponseData = self
+        let res: ResponseData<ResponseValue> = self
             .0
             .client
             .post("https://passport.bilibili.com/x/passport-login/sms/send")
@@ -346,7 +383,7 @@ impl Credential {
             .await?;
         // println!("{}", res);
         match res.data {
-            ResponseValue::Value(mut data)
+            Some(ResponseValue::Value(mut data))
                 if !data["captcha_key"]
                     .as_str()
                     .ok_or("send sms error")?
@@ -355,6 +392,12 @@ impl Credential {
                 payload["captcha_key"] = data["captcha_key"].take();
                 Ok(payload)
             }
+            Some(ResponseValue::Value(data))
+                if !data["recaptcha_url"].as_str().unwrap_or("").is_empty() =>
+            {
+                let url = data["recaptcha_url"].as_str().unwrap().to_string();
+                Err(Kind::NeedRecaptcha(url))
+            }
             _ => Err(Kind::Custom(res.to_string())),
         }
     }
@@ -362,8 +405,8 @@ impl Credential {
     pub async fn login_by_qrcode(&self, value: Value) -> Result<LoginInfo> {
         let mut form = json!({
             "appkey": AppKeyStore::BiliTV.app_key(),
-            "local_id": "0",
             "auth_code": value["data"]["auth_code"],
+            "local_id": "0",
             "ts": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
         });
         let urlencoded = serde_urlencoded::to_string(&form)?;
@@ -371,19 +414,26 @@ impl Credential {
         form["sign"] = Value::from(sign);
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let res: ResponseData = self
+            let raw = self
                 .0
                 .client
                 .post("http://passport.bilibili.com/x/passport-tv-login/qrcode/poll")
                 .form(&form)
                 .send()
                 .await?
-                .json()
-                .await?;
+                .error_for_status()?;
+            let full = raw.bytes().await?;
+
+            let res: ResponseData<ResponseValue> = serde_json::from_slice(&full).map_err(|_| {
+                Kind::Custom(format!(
+                    "error decoding response body, content: {:#?}",
+                    String::from_utf8_lossy(&full)
+                ))
+            })?;
             match res {
                 ResponseData {
                     code: 0,
-                    data: ResponseValue::Login(info),
+                    data: Some(ResponseValue::Login(info)),
                     ..
                 } => {
                     break Ok(LoginInfo {
@@ -519,14 +569,14 @@ impl Credential {
         if !response.status().is_success() {
             return Err(Kind::Custom(response.text().await?));
         }
-        let res: ResResult = response.json().await?;
+        let res: ResponseData = response.json().await?;
         if res.code != 0 {
             return Err(Kind::Custom(format!("{res:#?}")));
         }
         Ok(())
     }
 
-    fn sign(param: &str, app_sec: &str) -> String {
+    pub fn sign(param: &str, app_sec: &str) -> String {
         let mut hasher = Md5::new();
         // process input message
         hasher.update(format!("{}{}", param, app_sec));
@@ -544,6 +594,7 @@ impl Credential {
             )
             .domain("bilibili.com")
             .finish();
+
             store
                 .insert_raw(&cookie, &Url::parse("https://bilibili.com/").unwrap())
                 .unwrap();
@@ -563,6 +614,6 @@ impl Credential {
 
 impl Default for Credential {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

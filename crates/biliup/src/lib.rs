@@ -1,35 +1,16 @@
 use futures::Stream;
-
 use rand::distributions::uniform::{UniformFloat, UniformSampler};
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
-
 pub mod client;
 pub mod downloader;
 pub mod error;
 pub mod uploader;
-pub mod server {
-    pub mod errors;
 
-    pub mod api {
-        pub mod endpoints;
-        pub mod router;
-    }
-
-    pub mod core;
-
-    pub mod infrastructure {
-        pub mod repositories {
-            pub mod live_streamers_repository;
-        }
-
-        pub mod connection_pool;
-        pub mod live_streamers_service;
-        pub mod service_register;
-    }
-}
+pub use uploader::bilibili;
+pub use uploader::credential;
 
 pub async fn retry<F, Fut, O, E: std::fmt::Display>(mut f: F) -> Result<O, E>
 where
@@ -60,6 +41,22 @@ where
     }
 }
 
+trait ReqwestClientBuilderExt {
+    fn proxy_builder<U: reqwest::IntoUrl>(proxy: Option<U>) -> reqwest::ClientBuilder;
+}
+
+impl ReqwestClientBuilderExt for reqwest::Client {
+    fn proxy_builder<U: reqwest::IntoUrl>(proxy: Option<U>) -> reqwest::ClientBuilder {
+        match proxy {
+            Some(proxy) => {
+                tracing::debug!("使用代理: {}", proxy.as_str());
+                Self::builder().proxy(reqwest::Proxy::all(proxy).unwrap())
+            }
+            None => Self::builder(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::uploader::bilibili::Vid;
@@ -70,6 +67,7 @@ mod tests {
 
     #[test]
     fn it_works() {
+        assert_eq!(Ok(Vid::Aid(10)), Vid::from_str("10"));
         assert_eq!(Ok(Vid::Aid(971158452)), Vid::from_str("971158452"));
         assert_eq!(Ok(Vid::Aid(971158452)), Vid::from_str("av971158452"));
         assert_eq!(

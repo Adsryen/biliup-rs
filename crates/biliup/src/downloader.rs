@@ -3,10 +3,12 @@ use flv_parser::header;
 use nom::Err;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
+use tracing::{debug, error, info};
 
-use crate::downloader::util::Segmentable;
+use crate::downloader::util::{LifecycleFile, Segmentable};
 
 use crate::client::StatelessClient;
+use crate::downloader::extractor::CallbackFn;
 use std::str::FromStr;
 
 pub mod error;
@@ -23,8 +25,10 @@ pub async fn download(
     headers: HeaderMap,
     file_name: &str,
     segment: Segmentable,
+    file_name_hook: Option<CallbackFn>,
+    proxy: Option<&str>,
 ) -> anyhow::Result<()> {
-    let client = StatelessClient::new(headers);
+    let client = StatelessClient::new(headers, proxy);
     let response = client.retryable(url).await?;
     let mut connection = Connection::new(response);
     // let buf = &mut [0u8; 9];
@@ -37,16 +41,18 @@ pub async fn download(
     // io::copy(&mut resp, &mut out).expect("Unable to copy the content.");
     match header(&bytes) {
         Ok((_i, header)) => {
-            println!("header: {header:#?}");
-            println!("Downloading {}...", url);
-            httpflv::download(connection, file_name, segment).await;
+            debug!("header: {header:#?}");
+            info!("Downloading {}...", url);
+            let file = LifecycleFile::new(file_name, "flv", file_name_hook);
+            httpflv::download(connection, file, segment).await;
         }
         Err(Err::Incomplete(needed)) => {
-            println!("needed: {needed:?}")
+            error!("needed: {needed:?}")
         }
         Err(e) => {
-            println!("{e}");
-            hls::download(url, &client, file_name, segment).await?;
+            error!("{e}");
+            let file = LifecycleFile::new(file_name, "ts", file_name_hook);
+            hls::download(url, &client, file, segment).await?;
         }
     }
     Ok(())
@@ -105,6 +111,8 @@ mod tests {
             "testdouyu%Y-%m-%dT%H_%M_%S",
             // Segment::Size(20 * 1024 * 1024, 0),
             Segmentable::new(Some(std::time::Duration::from_secs(6000)), None),
+            None,
+            None,
         )?;
         Ok(())
     }
